@@ -5,6 +5,7 @@ import {
   Clock,
   Flame,
   ListTodo,
+  LogOut,
   Moon,
   Sun,
   Trash2,
@@ -26,6 +27,8 @@ interface SidebarProps {
   theme: ThemeMode;
   onToggleTheme: () => void;
   onClearCompleted: () => void;
+  username?: string | null;
+  onSignOut: () => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }
@@ -37,6 +40,8 @@ export function Sidebar({
   theme,
   onToggleTheme,
   onClearCompleted,
+  username,
+  onSignOut,
   mobileOpen,
   onCloseMobile,
 }: SidebarProps) {
@@ -175,6 +180,20 @@ export function Sidebar({
             {theme === 'dark' ? 'Dark' : 'Light'}
           </span>
         </button>
+
+        <div className="flex items-center justify-between gap-2 pt-2">
+          <span className="min-w-0 truncate text-xs font-medium text-slate-600 dark:text-slate-400">
+            {username ? `@${username}` : 'Signed in'}
+          </span>
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 whitespace-nowrap dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+          >
+            <LogOut className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>Sign Out</span>
+          </button>
+        </div>
       </div>
     </div>
   );

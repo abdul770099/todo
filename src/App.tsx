@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   ArrowUpDown,
   ClipboardList,
   Menu,
   Moon,
   Plus,
+  RefreshCw,
   Search,
   Sun,
   X,
@@ -13,9 +15,11 @@ import { AnimatePresence } from 'motion/react';
 import { ConfirmDeleteModal } from './components/ConfirmDeleteModal';
 import { EditTaskModal } from './components/EditTaskModal';
 import { Sidebar } from './components/Sidebar';
+import { SignInView } from './components/SignInView';
 import { StatsGrid } from './components/StatsGrid';
 import { TaskForm } from './components/TaskForm';
 import { TaskItem } from './components/TaskItem';
+import { useAuth } from './context/AuthContext';
 import {
   Priority,
   SidebarView,
@@ -25,13 +29,18 @@ import {
   TaskStatusFilter,
 } from './types/task';
 import {
+  clearCompletedTasksApi,
+  createTaskApi,
+  deleteTaskApi,
+  fetchTasksApi,
+  updateTaskApi,
+} from './utils/api';
+import {
   applyAndSaveTheme,
-  loadTasksFromStorage,
   loadThemeFromStorage,
-  saveTasksToStorage,
   ThemeMode,
 } from './utils/storage';
-import { generateTaskId, isDueSoonOrOverdue, sortTasks } from './utils/taskHelpers';
+import { isDueSoonOrOverdue, sortTasks } from './utils/taskHelpers';
 
 const VIEW_HEADINGS: Record<SidebarView, string> = {
   [SidebarView.ALL]: 'All Tasks',
@@ -42,7 +51,20 @@ const VIEW_HEADINGS: Record<SidebarView, string> = {
 };
 
 export default function App() {
-  const [tasks, setTasks] = useState<Task[]>(() => loadTasksFromStorage());
+  const {
+    user,
+    authError,
+    submitting,
+    login,
+    register,
+    signOutUser,
+    clearAuthError,
+    getIdToken,
+  } = useAuth();
+
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemeFromStorage());
 
   const [sidebarView, setSidebarView] = useState<SidebarView>(SidebarView.ALL);
@@ -57,21 +79,39 @@ export default function App() {
   const createTitleInputRef = useRef<HTMLInputElement | null>(null);
   const createSectionRef = useRef<HTMLElement | null>(null);
 
-  // Persist tasks to localStorage whenever tasks change
-  useEffect(() => {
-    saveTasksToStorage(tasks);
-  }, [tasks]);
-
   // Apply and persist theme whenever theme changes
   useEffect(() => {
     applyAndSaveTheme(theme);
   }, [theme]);
 
+  const loadTasks = useCallback(async () => {
+    if (!user) {
+      setTasks([]);
+      return;
+    }
+    setTasksLoading(true);
+    setApiError(null);
+    try {
+      const token = getIdToken();
+      const loaded = await fetchTasksApi(token);
+      setTasks(loaded);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to load your tasks.';
+      setApiError(message);
+    } finally {
+      setTasksLoading(false);
+    }
+  }, [user, getIdToken]);
+
+  useEffect(() => {
+    void loadTasks();
+  }, [loadTasks]);
+
   const handleToggleTheme = () => {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
   };
 
-  // Sidebar view selection synchronizes with status filter cleanly
   const handleSelectSidebarView = (view: SidebarView) => {
     setSidebarView(view);
     if (view === SidebarView.ALL) {
@@ -99,67 +139,105 @@ export default function App() {
   };
 
   // CRUD: Create
-  const handleCreateTask = (values: TaskFormValues) => {
-    const now = new Date().toISOString();
-    const newTask: Task = {
-      id: generateTaskId(),
-      title: values.title,
-      description: values.description,
-      priority: values.priority,
-      dueDate: values.dueDate,
-      completed: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    setTasks((prev) => [newTask, ...prev]);
+  const handleCreateTask = async (values: TaskFormValues) => {
+    setApiError(null);
+    try {
+      const token = getIdToken();
+      const created = await createTaskApi(token, values);
+      setTasks((prev) => [created, ...prev]);
 
-    // If user is currently viewing only Completed tasks, switch to All so they see the newly created task
-    if (statusFilter === TaskStatusFilter.COMPLETED || sidebarView === SidebarView.COMPLETED) {
-      setStatusFilter(TaskStatusFilter.ALL);
-      setSidebarView(SidebarView.ALL);
+      if (
+        statusFilter === TaskStatusFilter.COMPLETED ||
+        sidebarView === SidebarView.COMPLETED
+      ) {
+        setStatusFilter(TaskStatusFilter.ALL);
+        setSidebarView(SidebarView.ALL);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to save task.';
+      setApiError(message);
     }
   };
 
   // CRUD: Update (Edit fields)
-  const handleUpdateTask = (taskId: string, values: TaskFormValues) => {
-    const now = new Date().toISOString();
-    setTasks((prev) =>
-      prev.map((task) =>
-        task.id === taskId
-          ? {
-              ...task,
-              title: values.title,
-              description: values.description,
-              priority: values.priority,
-              dueDate: values.dueDate,
-              updatedAt: now,
-            }
-          : task
-      )
-    );
-    setEditingTask(null);
+  const handleUpdateTask = async (taskId: string, values: TaskFormValues) => {
+    setApiError(null);
+    try {
+      const token = getIdToken();
+      const updated = await updateTaskApi(token, taskId, values);
+      setTasks((prev) =>
+        prev.map((task) => (task.id === taskId ? updated : task))
+      );
+      setEditingTask(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to update task.';
+      setApiError(message);
+    }
   };
 
   // CRUD: Update (Toggle completion status)
-  const handleToggleComplete = (taskId: string) => {
-    const now = new Date().toISOString();
+  const handleToggleComplete = async (taskId: string) => {
+    const existing = tasks.find((t) => t.id === taskId);
+    if (!existing) return;
+
+    const nextCompleted = !existing.completed;
+    setApiError(null);
     setTasks((prev) =>
       prev.map((task) =>
-        task.id === taskId
-          ? { ...task, completed: !task.completed, updatedAt: now }
-          : task
+        task.id === taskId ? { ...task, completed: nextCompleted } : task
       )
     );
+
+    try {
+      const token = getIdToken();
+      const updated = await updateTaskApi(token, taskId, {
+        completed: nextCompleted,
+      });
+      setTasks((prev) =>
+        prev.map((task) => (task.id === taskId ? updated : task))
+      );
+    } catch (error) {
+      // Revert optimistic update on failure
+      setTasks((prev) =>
+        prev.map((task) =>
+          task.id === taskId ? { ...task, completed: existing.completed } : task
+        )
+      );
+      const message =
+        error instanceof Error ? error.message : 'Unable to update task status.';
+      setApiError(message);
+    }
   };
 
   // CRUD: Delete (Confirmed)
-  const handleConfirmDelete = (taskId: string) => {
-    setTasks((prev) => prev.filter((task) => task.id !== taskId));
-    setDeletingTask(null);
+  const handleConfirmDelete = async (taskId: string) => {
+    setApiError(null);
+    try {
+      const token = getIdToken();
+      await deleteTaskApi(token, taskId);
+      setTasks((prev) => prev.filter((task) => task.id !== taskId));
+      setDeletingTask(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to delete task.';
+      setApiError(message);
+    }
   };
 
-  const handleClearCompleted = () => {
-    setTasks((prev) => prev.filter((task) => !task.completed));
+  const handleClearCompleted = async () => {
+    setApiError(null);
+    try {
+      const token = getIdToken();
+      const deletedIds = await clearCompletedTasksApi(token);
+      const deletedSet = new Set(deletedIds);
+      setTasks((prev) => prev.filter((task) => !deletedSet.has(task.id)));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to clear completed tasks.';
+      setApiError(message);
+    }
   };
 
   const handleFocusCreateForm = () => {
@@ -232,6 +310,21 @@ export default function App() {
     statusFilter !== TaskStatusFilter.ALL ||
     sidebarView !== SidebarView.ALL;
 
+  // Unauthenticated gate
+  if (!user) {
+    return (
+      <SignInView
+        onLogin={login}
+        onRegister={register}
+        error={authError}
+        submitting={submitting}
+        onClearError={clearAuthError}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+      />
+    );
+  }
+
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       {/* Sidebar Navigation */}
@@ -248,6 +341,8 @@ export default function App() {
         theme={theme}
         onToggleTheme={handleToggleTheme}
         onClearCompleted={handleClearCompleted}
+        username={user.username}
+        onSignOut={signOutUser}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
       />
@@ -308,6 +403,37 @@ export default function App() {
 
         {/* Main Workspace */}
         <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+          {/* Localized Error Banner */}
+          {apiError && (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/70 dark:bg-red-950/50 dark:text-red-300"
+            >
+              <div className="flex items-center gap-2.5">
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>{apiError}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void loadTasks()}
+                  className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Retry</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setApiError(null)}
+                  aria-label="Dismiss error"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg text-red-600 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-950"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 4-Column Dashboard KPI Strip */}
           <StatsGrid
             total={stats.total}
@@ -333,7 +459,7 @@ export default function App() {
                   Create New Task
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  Tasks are saved automatically to your browser.
+                  Tasks are saved to your account automatically.
                 </p>
               </div>
 
@@ -434,8 +560,26 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Tasks List or Empty States */}
-              {tasks.length === 0 ? (
+              {/* Tasks Loading Skeleton, Empty States, or Task List */}
+              {tasksLoading ? (
+                <div className="space-y-3" aria-label="Loading tasks">
+                  {[1, 2, 3].map((row) => (
+                    <div
+                      key={row}
+                      className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="h-5 w-5 rounded-md bg-slate-200 dark:bg-slate-800" />
+                        <div className="flex-1 space-y-2.5">
+                          <div className="h-4 w-2/5 rounded bg-slate-200 dark:bg-slate-800" />
+                          <div className="h-3.5 w-4/5 rounded bg-slate-100 dark:bg-slate-800/70" />
+                          <div className="h-3 w-1/3 rounded bg-slate-100 dark:bg-slate-800/70" />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : tasks.length === 0 ? (
                 <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-6 py-14 text-center dark:border-slate-700 dark:bg-slate-900">
                   <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                     <ClipboardList className="h-6 w-6" aria-hidden="true" />
